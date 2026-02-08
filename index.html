@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Spotter.AI | Relative Biometrics v30</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;700;900&family=JetBrains+Mono:wght@500&display=swap');
+
+        :root {
+            --neon: #00ff41;
+            --bg: #0a0a0a;
+            --stop: #ef4444;
+            --recovery: #00d1ff;
+        }
+
+        body {
+            background: var(--bg);
+            color: white;
+            font-family: 'Outfit', sans-serif;
+            overflow: hidden;
+            margin: 0;
+            padding: 0;
+        }
+
+        .cyber-grid {
+            background-image: radial-gradient(var(--neon) 1px, transparent 0);
+            background-size: 30px 30px;
+        }
+
+        .glass {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .active-pill {
+            background: var(--neon) !important;
+            color: black !important;
+            font-weight: 900;
+            box-shadow: 0 0 25px var(--neon);
+        }
+
+        /* Layout Fixes */
+        .app-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        .viewport-container {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+            background: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        video,
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+        }
+
+        canvas {
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+
+        .massive-counter {
+            font-size: min(60vw, 30vh);
+            line-height: 0.8;
+            font-weight: 900;
+            color: var(--neon);
+            text-shadow: 0 0 50px rgba(0, 255, 65, 0.5);
+            font-family: 'Outfit', sans-serif;
+            letter-spacing: -0.05em;
+        }
+
+        .exit-pill {
+            background-color: var(--stop);
+            padding: 10px 28px;
+            border-radius: 9999px;
+            font-weight: 900;
+            font-style: italic;
+            font-size: 14px;
+            text-transform: lowercase;
+            box-shadow: 0 5px 15px rgba(239, 68, 68, 0.4);
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                transform: scale(1);
+                opacity: 0.2;
+            }
+
+            50% {
+                transform: scale(1.3);
+                opacity: 0.5;
+            }
+        }
+
+        .breathing-pulse {
+            animation: pulse 6s ease-in-out infinite;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        const createSession = (key, title, exercises) => ({
+            key, title,
+            list: exercises.map((ex, i) => {
+                let targetReps = 12, targetSets = 3, goalLabel = "30 REPS";
+                if (ex.phase === 'WARM') { targetReps = 30; targetSets = 1; goalLabel = "30 REPS"; }
+                if (ex.phase === 'COOL') { targetReps = 0; targetSets = 1; goalLabel = "30S HOLD"; }
+                return { ...ex, seq: i + 1, id: `${key}-${i}`, targetReps, targetSets, goalLabel };
+            })
+        });
+
+        const SESSIONS = {
+            lower: createSession('lower', 'Lower Body', [
+                { phase: 'WARM', name: 'Jumping Jacks', logic: 'jack' },
+                { phase: 'TRAIN', name: 'Strict Squats', logic: 'squat' },
+                { phase: 'TRAIN', name: 'Depth Lunges', logic: 'squat' },
+                { phase: 'COOL', name: 'Quad Recovery', logic: 'hold' }
+            ]),
+            upper: createSession('upper', 'Upper Body', [
+                { phase: 'WARM', name: 'Jumping Jacks', logic: 'jack' },
+                { phase: 'TRAIN', name: 'Push-ups', logic: 'pushup' },
+                { phase: 'TRAIN', name: 'Pike Focus', logic: 'pushup' },
+                { phase: 'COOL', name: 'Arm Stretch', logic: 'hold' }
+            ]),
+            core: createSession('core', 'Core Section', [
+                { phase: 'WARM', name: 'Jumping Jacks', logic: 'jack' },
+                { phase: 'TRAIN', name: 'Ab Crunches', logic: 'crunch' },
+                { phase: 'TRAIN', name: 'Leg Raises', logic: 'jack' },
+                { phase: 'COOL', name: 'Cobra Hold', logic: 'hold' }
+            ]),
+            cardio: createSession('cardio', 'Cardio Burn', [
+                { phase: 'WARM', name: 'Jumping Jacks', logic: 'jack' },
+                { phase: 'TRAIN', name: 'Burpees', logic: 'jack' },
+                { phase: 'TRAIN', name: 'Mountain Climbers', logic: 'jack' },
+                { phase: 'COOL', name: 'Deep Breaths', logic: 'hold' }
+            ])
+        };
+
+        const App = () => {
+            const [view, setView] = useState('home');
+            const [session, setSession] = useState(null);
+            const [step, setStep] = useState(0);
+            const [reps, setReps] = useState(0);
+            const [currentSet, setCurrentSet] = useState(1);
+            const [isResting, setIsResting] = useState(false);
+            const [timerSec, setTimerSec] = useState(30);
+            const [status, setStatus] = useState('ALIGNING...');
+            const [engineReady, setEngineReady] = useState(false);
+
+            const videoRef = useRef(null);
+            const canvasRef = useRef(null);
+            const cameraRef = useRef(null);
+            const poseRef = useRef(null);
+            const aiState = useRef({ stage: 'neutral', lastTime: 0, cooldown: false });
+
+            useEffect(() => {
+                const check = setInterval(() => {
+                    if (window.Pose && window.Camera) { setEngineReady(true); clearInterval(check); }
+                }, 500);
+                return () => clearInterval(check);
+            }, []);
+
+            const exitWorkout = useCallback(() => {
+                if (cameraRef.current) cameraRef.current.stop();
+                if (poseRef.current) poseRef.current.close();
+                cameraRef.current = null;
+                poseRef.current = null;
+                setView('home'); setReps(0); setCurrentSet(1); setIsResting(false);
+            }, []);
+
+            const handleCycle = useCallback(() => {
+                const activeEx = session.list[step];
+                if (currentSet < activeEx.targetSets) {
+                    setCurrentSet(s => s + 1); setReps(0);
+                    aiState.current = { stage: 'neutral', lastTime: 0, cooldown: false };
+                    setIsResting(false);
+                } else {
+                    const n = step + 1;
+                    if (n < session.list.length) {
+                        setStep(n); setReps(0); setCurrentSet(1);
+                        setIsResting(false);
+                        aiState.current = { stage: 'neutral', lastTime: 0, cooldown: false };
+                    } else { exitWorkout(); }
+                }
+            }, [session, step, currentSet, exitWorkout]);
+
+            useEffect(() => {
+                if (isResting || (session?.list[step]?.phase === 'COOL' && view === 'workout')) {
+                    setTimerSec(30);
+                    const t = setInterval(() => {
+                        setTimerSec(v => {
+                            if (v <= 1) { clearInterval(t); handleCycle(); return 0; }
+                            return v - 1;
+                        });
+                    }, 1000);
+                    return () => clearInterval(t);
+                }
+            }, [isResting, step, view, handleCycle]);
+
+            const onResults = useCallback((results) => {
+                if (!results.poseLandmarks || !canvasRef.current || view !== 'workout' || isResting) return;
+
+                const canvas = canvasRef.current;
+                const video = videoRef.current;
+                if (!video) return;
+
+                const rect = video.getBoundingClientRect();
+                if (canvas.width !== rect.width || canvas.height !== rect.height) {
+                    canvas.width = rect.width;
+                    canvas.height = rect.height;
+                }
+
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                results.poseLandmarks.forEach(p => {
+                    if (p.visibility > 0.5) {
+                        ctx.beginPath(); ctx.arc(p.x * canvas.width, p.y * canvas.height, 5, 0, 2 * Math.PI);
+                        ctx.fillStyle = session.list[step].phase === 'COOL' ? '#00d1ff' : '#00ff41';
+                        ctx.fill();
+                    }
+                });
+
+                const activeEx = session.list[step];
+                const lm = results.poseLandmarks;
+                const now = Date.now();
+
+                if (aiState.current.cooldown && now - aiState.current.lastTime < 800) return;
+                aiState.current.cooldown = false;
+
+                const getAngle = (a, b, c) => {
+                    const r = Math.atan2(lm[c].y - lm[b].y, lm[c].x - lm[b].x) - Math.atan2(lm[a].y - lm[b].y, lm[a].x - lm[b].x);
+                    let ang = Math.abs((r * 180.0) / window.Math.PI);
+                    return ang > 180 ? 360 - ang : ang;
+                };
+
+                // --- RELATIVE BIOMETRIC ENGINE (v30) ---
+                if (activeEx.logic === 'jack') {
+                    // 1. Establish Personal Baseline
+                    const shoulderWidth = Math.abs(lm[11].x - lm[12].x);
+                    if (shoulderWidth < 0.05) { setStatus("STEP BACK"); return; } // Too far/close
+
+                    // 2. Relative Targets
+                    const ankleDist = Math.abs(lm[27].x - lm[28].x);
+                    const handsY = (lm[15].y + lm[16].y) / 2;
+                    const noseY = lm[0].y;
+
+                    // 3. States
+                    const isNeutral = ankleDist < shoulderWidth * 1.2 && handsY > lm[11].y; // Feet close, hands down
+                    const isPeak = ankleDist > shoulderWidth * 1.5 && handsY < noseY; // Feet wide, hands up
+
+                    if (isNeutral) {
+                        if (aiState.current.stage === 'peak') {
+                            aiState.current.lastTime = now; aiState.current.cooldown = true;
+                            setReps(p => { const n = p + 1; if (n >= activeEx.targetReps) setIsResting(true); return n; });
+                        }
+                        aiState.current.stage = 'neutral';
+                        setStatus("JUMP WIDER!");
+                    } else if (isPeak) {
+                        aiState.current.stage = 'peak';
+                        setStatus("GOOD! RETURN");
+                    } else {
+                        if (aiState.current.stage === 'neutral') setStatus("ARMS HIGHER!");
+                    }
+
+                } else if (activeEx.logic === 'squat') {
+                    const ang = getAngle(24, 26, 28);
+                    if (ang > 165) {
+                        if (aiState.current.stage === 'peak') {
+                            aiState.current.lastTime = now; aiState.current.cooldown = true;
+                            setReps(p => { const n = p + 1; if (n >= activeEx.targetReps) setIsResting(true); return n; });
+                        }
+                        aiState.current.stage = 'neutral';
+                        setStatus("LOWER HIPS");
+                    } else if (ang < 120 && aiState.current.stage === 'neutral') { // 120 is more forgiving than 95
+                        aiState.current.stage = 'peak';
+                        setStatus("UP!");
+                    }
+                } else if (activeEx.logic === 'pushup') {
+                    const ang = getAngle(11, 13, 15);
+                    if (ang > 160) {
+                        if (aiState.current.stage === 'peak') {
+                            aiState.current.lastTime = now; aiState.current.cooldown = true;
+                            setReps(p => { const n = p + 1; if (n >= activeEx.targetReps) setIsResting(true); return n; });
+                        }
+                        aiState.current.stage = 'neutral';
+                        setStatus("CHEST DOWN");
+                    } else if (ang < 100 && aiState.current.stage === 'neutral') {
+                        aiState.current.stage = 'peak';
+                        setStatus("PUSH UP!");
+                    }
+                }
+            }, [view, step, session, isResting]);
+
+            useEffect(() => {
+                if (view === 'workout' && engineReady && videoRef.current) {
+                    poseRef.current = new window.Pose({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${f}` });
+                    poseRef.current.setOptions({ modelComplexity: 0, smoothLandmarks: true, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+                    poseRef.current.onResults(onResults);
+                    cameraRef.current = new window.Camera(videoRef.current, {
+                        onFrame: async () => { if (videoRef.current?.readyState >= 2) await poseRef.current.send({ image: videoRef.current }); },
+                        width: 1280, height: 720
+                    });
+                    cameraRef.current.start();
+                }
+            }, [view, engineReady, onResults]);
+
+            if (view === 'home') return (
+                <div className="app-container cyber-grid p-8 overflow-y-auto bg-[#0a0a0a]">
+                    <header className="text-center mt-12 mb-10">
+                        <h1 className="text-6xl font-black italic tracking-tighter text-white">SPOTTER.AI</h1>
+                        <p className="text-[#00ff41] font-mono text-[10px] uppercase tracking-[0.5em] mt-2 font-black">Relative Biometrics v30</p>
+                    </header>
+                    <div className="w-full max-w-xl mx-auto space-y-4 mb-20">
+                        {Object.values(SESSIONS).map(s => (
+                            <div key={s.key} onClick={() => { setSession(s); setStep(0); setView('playlist'); }} className="glass p-8 rounded-[2.5rem] flex justify-between items-center cursor-pointer hover:border-[#00ff41] active:scale-95 transition-all group">
+                                <h3 className="text-2xl font-black uppercase italic tracking-tight">{s.title}</h3>
+                                <div className="w-10 h-10 rounded-full border border-white/10 flex items-center justify-center group-hover:bg-[#00ff41] group-hover:text-black transition-all">
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="m9 18 6-6-6-6" /></svg>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+
+            if (view === 'playlist') return (
+                <div className="app-container p-6 bg-black text-white">
+                    <div className="flex items-center gap-4 mb-8 mt-4">
+                        <button onClick={() => setView('home')} className="p-3 bg-white/5 rounded-full hover:bg-white/10 transition-colors">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="m15 18-6-6 6-6" /></svg>
+                        </button>
+                        <h2 className="text-3xl font-black uppercase italic">{session.title}</h2>
+                    </div>
+                    <div className="flex-1 overflow-y-auto no-scrollbar space-y-3 pb-32">
+                        {session.list.map(ex => (
+                            <div key={ex.id} className="glass p-6 rounded-3xl flex items-center gap-6">
+                                <div className="text-2xl font-black italic text-white/10 w-8">{ex.seq}</div>
+                                <div className="flex-1">
+                                    <p className={`text-[9px] font-black uppercase mb-1 tracking-widest ${ex.phase === 'TRAIN' ? 'text-[#00ff41]' : 'text-white/40'}`}>{ex.phase}</p>
+                                    <h4 className="text-xl font-black uppercase italic">{ex.name}</h4>
+                                    <p className="text-[10px] text-white/30 font-mono italic">{ex.goalLabel}</p>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="fixed bottom-0 left-0 right-0 p-8 bg-gradient-to-t from-black to-transparent flex justify-center">
+                        <button onClick={() => setView('workout')} className="w-full max-w-xl bg-[#00ff41] text-black font-black py-5 rounded-2xl shadow-2xl uppercase tracking-widest active:scale-95 transition-all">Start Workout</button>
+                    </div>
+                </div>
+            );
+
+            const activeEx = session.list[step];
+            const isCooling = activeEx.phase === 'COOL';
+
+            return (
+                <div className="app-container bg-black font-mono">
+                    <div className="absolute top-0 inset-x-0 p-6 flex justify-between items-start z-50 bg-gradient-to-b from-black/90 to-transparent">
+                        <button onClick={exitWorkout} className="exit-pill text-white">exit</button>
+                        <div className="text-right">
+                            <p className="text-[#00ff41] text-[10px] font-bold uppercase tracking-widest">Ex {step + 1} / {session.list.length}</p>
+                            <h2 className="text-white text-3xl font-black uppercase italic leading-none">{activeEx.name}</h2>
+                        </div>
+                    </div>
+
+                    <div className="viewport-container">
+                        <video ref={videoRef} autoPlay playsInline muted />
+                        <canvas ref={canvasRef} />
+
+                        {(isResting || isCooling) ? (
+                            <div className="absolute inset-0 z-50 bg-black/95 flex flex-col items-center justify-center text-center p-12">
+                                <p className={`text-[10px] uppercase tracking-[0.4em] font-black mb-10 ${isCooling ? 'text-[#00d1ff]' : 'text-[#00ff41]'}`}>
+                                    {isCooling ? 'RECOVERY' : 'REST'}
+                                </p>
+                                <div className="massive-counter !text-white">{timerSec}</div>
+                            </div>
+                        ) : (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none z-20">
+                                <p className="text-white/40 uppercase mb-4 tracking-widest font-black text-[10px]">Round {currentSet} of {activeEx.targetSets}</p>
+                                <div className="massive-counter">{reps}</div>
+                                <div className="goal-indicator mt-4 text-white">Goal: {activeEx.goalLabel}</div>
+                            </div>
+                        )}
+                        <div className="absolute inset-0 pointer-events-none opacity-5 cyber-grid" />
+                    </div>
+
+                    <div className="bg-[#050505] p-6 border-t border-white/10 z-50">
+                        <div className="flex gap-4 overflow-x-auto no-scrollbar pb-6 mb-2">
+                            {session.list.map((item, i) => (
+                                <div key={item.id} className={`min-w-[140px] h-16 rounded-2xl flex flex-col justify-center px-5 transition-all border border-white/5 ${i === step ? 'active-pill' : 'bg-white/5 opacity-30'}`}>
+                                    <span className="text-[8px] font-black uppercase tracking-tighter opacity-60">Step {item.seq}</span>
+                                    <span className="text-[10px] font-black uppercase truncate">{item.name}</span>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="flex items-center justify-between">
+                            <div className="flex flex-col">
+                                <span className="text-[8px] text-white/40 font-black uppercase tracking-widest">AI Status</span>
+                                <span className="text-xs font-bold italic text-white uppercase tracking-tighter">{status}</span>
+                            </div>
+                            <button onClick={handleCycle} className="bg-white text-black px-12 py-4 rounded-full font-black italic text-[11px] shadow-2xl active:scale-95 transition-transform uppercase tracking-widest">Skip</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+
+</html>
