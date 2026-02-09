@@ -1,0 +1,105 @@
+@import "tailwindcss";
+
+:root {
+  --neon: #00ff41;
+  --bg: #0a0a0a;
+  --stop: #ef4444;
+  --recovery: #00d1ff;
+}
+
+@theme inline {
+  --color-neon: var(--neon);
+  --color-bg: var(--bg);
+  --color-stop: var(--stop);
+  --color-recovery: var(--recovery);
+  --font-sans: var(--font-outfit), sans-serif;
+  --font-mono: var(--font-jetbrains-mono), monospace;
+}
+
+body {
+  background: var(--bg);
+  color: white;
+  font-family: var(--font-outfit), sans-serif;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+.cyber-grid {
+  background-image: radial-gradient(var(--neon) 1px, transparent 0);
+  background-size: 30px 30px;
+}
+
+.glass {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(20px);
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.active-pill {
+  background: var(--neon) !important;
+  color: black !important;
+  font-weight: 900;
+  box-shadow: 0 0 25px var(--neon);
+}
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.viewport-container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.massive-counter {
+  font-size: min(60vw, 30vh);
+  line-height: 0.8;
+  font-weight: 900;
+  color: var(--neon);
+  text-shadow: 0 0 50px rgba(0, 255, 65, 0.5);
+  font-family: var(--font-outfit), sans-serif;
+  letter-spacing: -0.05em;
+}
+
+.exit-pill {
+  background-color: var(--stop);
+  padding: 10px 28px;
+  border-radius: 9999px;
+  font-weight: 900;
+  font-style: italic;
+  font-size: 14px;
+  text-transform: lowercase;
+  box-shadow: 0 5px 15px rgba(239, 68, 68, 0.4);
+  cursor: pointer;
+  border: none;
+}
+
+@keyframes pulse {
+
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.2;
+  }
+
+  50% {
+    transform: scale(1.3);
+    opacity: 0.5;
+  }
+}
+
+.breathing-pulse {
+  animation: pulse 6s ease-in-out infinite;
+}
