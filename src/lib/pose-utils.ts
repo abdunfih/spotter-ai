@@ -61,8 +61,10 @@ export function detectJackState(landmarks: PoseLandmark[], shoulderWidth: number
     const noseY = getNoseY(landmarks);
     const shoulderY = getShoulderY(landmarks);
 
-    const isNeutral = ankleDist < shoulderWidth * 1.2 && handsY > shoulderY;
-    const isPeak = ankleDist > shoulderWidth * 1.5 && handsY < noseY;
+    // Architecture v37: Feet must be wider than 1.4x Shoulder Width for peak
+    // Arms: Wrists (Y) higher than Nose (Y) for peak
+    const isNeutral = ankleDist < shoulderWidth * 1.4 && handsY > shoulderY;
+    const isPeak = ankleDist > shoulderWidth * 1.4 && handsY < noseY;
 
     return { isNeutral, isPeak };
 }
@@ -73,8 +75,8 @@ export interface SquatState {
     angle: number;
 }
 
-// Normal Squat threshold (angle < 120 for deep, > 165 for standing)
-const SQUAT_DEEP_THRESHOLD = 120;
+// Squat thresholds: Down Trigger: Angle < 135°, Up Trigger: Angle > 165°
+const SQUAT_DEEP_THRESHOLD = 135;
 const SQUAT_STANDING_THRESHOLD = 165;
 
 export function detectSquatState(landmarks: PoseLandmark[]): SquatState {
@@ -119,8 +121,9 @@ export function detectPushupState(landmarks: PoseLandmark[]): PushupState {
         return { isUp: false, isDown: false, angle: 0 };
     }
     const angle = getAngle(shoulder, elbow, wrist);
+    // Architecture v37: Down Trigger: Angle < 100°, Up Trigger: Angle > 150°
     return {
-        isUp: angle > 160,
+        isUp: angle > 150,
         isDown: angle < 100,
         angle
     };

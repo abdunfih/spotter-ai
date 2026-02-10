@@ -1,21 +1,30 @@
 'use client';
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { getSessionByKey } from '@/lib/sessions';
 import { useWorkout } from '@/context/WorkoutContext';
 import { PoseLandmark } from '@/types';
-import { detectSquatState } from '@/lib/pose-utils';
-import { RepCounter } from '@/components/workout/RepCounter';
-import { RestOverlay } from '@/components/workout/RestOverlay';
-import { WorkoutControls } from '@/components/workout/WorkoutControls';
+import { detectSquatState, detectJackState, detectPushupState, getAngle, calculateShoulderWidth } from '@/lib/pose-utils';
+import { speak, speakRepCount, speakCue, triggerConfetti, stopSpeaking } from '@/lib/feedback';
 import { ExitButton } from '@/components/ui/ExitButton';
+import { PreFlightGuide } from '@/components/workout/PreFlightGuide';
+import { ActionPhase } from '@/components/workout/ActionPhase';
+import { RestPhase } from '@/components/workout/RestPhase';
+import { WorkoutControls } from '@/components/workout/WorkoutControls';
 
 interface MediaPipePose {
     setOptions: (options: Record<string, unknown>) => void;
     onResults: (callback: (results: { poseLandmarks?: PoseLandmark[] }) => void) => void;
     send: (data: { image: HTMLVideoElement }) => Promise<void>;
     close: () => void;
+}
+
+declare global {
+    interface Window {
+        Pose?: new (options: { locateFile: (file: string) => string }) => MediaPipePose;
+        Camera?: any;
+    }
 }
 
 export default function WorkoutPage() {
@@ -30,35 +39,31 @@ export default function WorkoutPage() {
         step,
         setStep,
         currentSet,
-        setCurrentSet,
-        isResting,
-        setIsResting,
+        preFlightPhase,
+        startActionPhase,
+        startRestPhase,
         cycleToNextExercise,
-        exitWorkout,
     } = useWorkout();
 
-    // Local state
     const [landmarks, setLandmarks] = useState<PoseLandmark[] | null>(null);
-    const [localStatus, setLocalStatus] = useState('ALIGNING...');
     const [localReps, setLocalReps] = useState(0);
-    const [localTimer, setLocalTimer] = useState(30);
     const [poseLoaded, setPoseLoaded] = useState(false);
     const [cameraReady, setCameraReady] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [detectedCount, setDetectedCount] = useState(0);
+    const [feedback, setFeedback] = useState('READY');
 
-    // Rep counting state
-    const [prevSquatState, setPrevSquatState] = useState<'standing' | 'deep' | 'neutral'>('standing');
+    const prevSquatStateRef = useRef<'standing' | 'deep' | 'neutral'>('neutral');
     const repCountedRef = useRef(false);
+    const aiState = useRef<{ stage: 'neutral' | 'peak'; lastTime: number; cooldown: boolean }>({ stage: 'neutral', lastTime: 0, cooldown: false });
 
-    // Refs
     const videoRef = useRef<HTMLVideoElement>(null);
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-    const streamRef = useRef<MediaStream | null>(null);
-    const animationRef = useRef<number | null>(null);
     const poseRef = useRef<MediaPipePose | null>(null);
+    const streamRef = useRef<MediaStream | null>(null);
+    const animationFrameRef = useRef<number | null>(null);
+    const landmarksRef = useRef<PoseLandmark[] | null>(null);
+    const poseInitializedRef = useRef(false);
+    const scriptsLoadedRef = useRef(false);
 
-    // Initialize session
     useEffect(() => {
         const foundSession = getSessionByKey(sessionId);
         if (foundSession) {
@@ -69,281 +74,342 @@ export default function WorkoutPage() {
         }
     }, [sessionId, exerciseIndex, router, setSession, setStep]);
 
-    // Reset rep counting state when exercise changes
+    // Initialize MediaPipe Pose detection - check if already loaded in head
     useEffect(() => {
-        setLocalReps(0);
-        setPrevSquatState('standing');
-        repCountedRef.current = false;
-    }, [step, session]);
-
-    // Load MediaPipe
-    useEffect(() => {
-        if (typeof window === 'undefined') return;
-        if ((window as unknown as { Pose?: MediaPipePose }).Pose) {
-            setPoseLoaded(true);
-            return;
-        }
-
-        const script = document.createElement('script');
-        script.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js';
-        script.async = true;
-        script.onload = () => setPoseLoaded(true);
-        script.onerror = () => setError('Failed to load MediaPipe');
-        document.body.appendChild(script);
-    }, []);
-
-    // Start camera
-    useEffect(() => {
-        if (!poseLoaded) return;
-
-        const startCamera = async () => {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: 1280, height: 720, facingMode: 'user' },
-                });
-                streamRef.current = stream;
-                if (videoRef.current) {
-                    videoRef.current.srcObject = stream;
-                    await videoRef.current.play();
-                    setCameraReady(true);
-                }
-            } catch (err) {
-                setError(err instanceof Error ? err.message : 'Camera error');
+        console.log('[MediaPipe] Checking for window.Pose...');
+        
+        const checkPose = setInterval(() => {
+            if (window.Pose) {
+                console.log('[MediaPipe] window.Pose found!');
+                clearInterval(checkPose);
+                setPoseLoaded(true);
             }
-        };
-
-        startCamera();
+        }, 100);
 
         return () => {
-            if (streamRef.current) {
-                streamRef.current.getTracks().forEach(track => track.stop());
-            }
+            clearInterval(checkPose);
         };
-    }, [poseLoaded]);
+    }, []);
 
-    // Setup MediaPipe pose detection
-    useEffect(() => {
-        if (!poseLoaded || !cameraReady || typeof window === 'undefined') return;
+    const initPose = useCallback(() => {
+        if (poseInitializedRef.current || !window.Pose) {
+            console.log('[MediaPipe] Skipping init - already initialized or no Pose:', poseInitializedRef.current, !!window.Pose);
+            return;
+        }
+        poseInitializedRef.current = true;
 
-        const PoseClass = (window as unknown as { Pose: new (options: { locateFile: (file: string) => string }) => MediaPipePose }).Pose;
-        if (!PoseClass) return;
-
-        const pose = new PoseClass({
-            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
+        console.log('[MediaPipe] Initializing Pose with CDN...');
+        poseRef.current = new window.Pose({
+            locateFile: (file) => {
+                console.log('[MediaPipe] Loading asset:', file);
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+            },
         });
 
-        pose.setOptions({
+        poseRef.current.setOptions({
             modelComplexity: 1,
             smoothLandmarks: true,
             minDetectionConfidence: 0.5,
             minTrackingConfidence: 0.5,
         });
 
-        pose.onResults((results: { poseLandmarks?: PoseLandmark[] }) => {
+        poseRef.current.onResults((results) => {
+            console.log('[MediaPipe] Got results, landmarks:', results.poseLandmarks?.length);
             const normalizedLandmarks = results.poseLandmarks || [];
+            landmarksRef.current = normalizedLandmarks;
             setLandmarks(normalizedLandmarks);
-            setDetectedCount(normalizedLandmarks.length);
 
+            if (preFlightPhase !== 'ACTION') return;
             if (!session?.list[step]) return;
 
             const exercise = session.list[step];
+            const now = Date.now();
 
-            if (exercise.phase === 'COOL' || isResting) {
-                setLocalStatus(exercise.phase === 'COOL' ? 'RECOVERY' : 'REST');
-                return;
-            }
+            // Skip COOL phase exercises (holds)
+            if (exercise.phase === 'COOL') return;
 
-            if (normalizedLandmarks.length > 0) {
-                setLocalStatus('TRACKING');
+            // AI state with cooldown
+            if (aiState.current.cooldown && now - aiState.current.lastTime < 1000) return;
+            aiState.current.cooldown = false;
 
-                // Rep counting logic for squats
-                if (exercise.logic === 'squat-normal') {
-                    const squatState = detectSquatState(normalizedLandmarks);
+            if (exercise.logic === 'squat') {
+                const squatState = detectSquatState(normalizedLandmarks);
+                const currentState = squatState.isDeep ? 'deep' : squatState.isStanding ? 'standing' : 'neutral';
 
-                    // Determine current state
-                    const currentState = squatState.isDeep ? 'deep' : squatState.isStanding ? 'standing' : 'neutral';
+                if (!repCountedRef.current && prevSquatStateRef.current === 'standing' && currentState === 'deep') {
+                    repCountedRef.current = true;
+                    setFeedback('HOLD');
+                    aiState.current.stage = 'peak';
+                }
 
-                    // Rep counting: standing -> deep -> standing = 1 rep
-                    if (!repCountedRef.current && prevSquatState === 'standing' && currentState === 'deep') {
-                        repCountedRef.current = true;
+                if (repCountedRef.current && prevSquatStateRef.current === 'deep' && currentState === 'standing') {
+                    const newReps = localReps + 1;
+                    setLocalReps(newReps);
+                    repCountedRef.current = false;
+                    prevSquatStateRef.current = 'standing';
+                    setFeedback('GOOD');
+                    aiState.current.stage = 'neutral';
+                    aiState.current.lastTime = now;
+                    aiState.current.cooldown = true;
+                    speakRepCount(newReps);
+
+                    if (activeEx && newReps >= activeEx.targetReps) {
+                        speak("Set finished");
                     }
+                }
 
-                    if (repCountedRef.current && prevSquatState === 'deep' && currentState === 'standing') {
-                        setLocalReps(prev => prev + 1);
-                        repCountedRef.current = false;
+                if (currentState === 'neutral' && !repCountedRef.current) {
+                    setFeedback('SQUAT');
+                }
+            } else if (exercise.logic === 'jack') {
+                const shoulderWidth = calculateShoulderWidth(normalizedLandmarks);
+                const jackState = detectJackState(normalizedLandmarks, shoulderWidth);
+
+                const handsUp = normalizedLandmarks[15]?.y < normalizedLandmarks[0]?.y;
+
+                if (!jackState.isPeak && !jackState.isNeutral) {
+                    if (aiState.current.stage === 'peak') {
+                        const newReps = localReps + 1;
+                        setLocalReps(newReps);
+                        aiState.current.lastTime = now;
+                        aiState.current.cooldown = true;
+                        speakRepCount(newReps);
+
+                        if (activeEx && newReps >= activeEx.targetReps) {
+                            speak("Set finished");
+                        }
                     }
+                    aiState.current.stage = 'neutral';
+                    setFeedback('JUMP UP!');
+                } else if (jackState.isPeak && aiState.current.stage === 'neutral') {
+                    aiState.current.stage = 'peak';
+                    setFeedback('RETURN');
+                }
+            } else if (exercise.logic === 'pushup') {
+                const pushupState = detectPushupState(normalizedLandmarks);
 
-                    setPrevSquatState(currentState);
+                if (pushupState.isDown) {
+                    aiState.current.stage = 'peak';
+                    setFeedback('PUSH');
+                }
+                if (pushupState.isUp && aiState.current.stage === 'peak') {
+                    const newReps = localReps + 1;
+                    setLocalReps(newReps);
+                    aiState.current.stage = 'neutral';
+                    setFeedback('DOWN');
+                    aiState.current.lastTime = now;
+                    aiState.current.cooldown = true;
+                    speakRepCount(newReps);
+
+                    if (activeEx && newReps >= activeEx.targetReps) {
+                        speak("Set finished");
+                    }
+                }
+            } else if (exercise.logic === 'crunch') {
+                // Crunch detection based on shoulder movement
+                const shoulderY = normalizedLandmarks[11]?.y ?? 0;
+                const hipY = normalizedLandmarks[23]?.y ?? 0;
+                const isUp = shoulderY < hipY - 0.15;
+                const isDown = shoulderY >= hipY - 0.1;
+
+                if (isUp) {
+                    aiState.current.stage = 'peak';
+                    setFeedback('HOLD');
+                }
+                if (isDown && aiState.current.stage === 'peak') {
+                    const newReps = localReps + 1;
+                    setLocalReps(newReps);
+                    aiState.current.stage = 'neutral';
+                    setFeedback('UP');
+                    aiState.current.lastTime = now;
+                    aiState.current.cooldown = true;
+                    speakRepCount(newReps);
+
+                    if (activeEx && newReps >= activeEx.targetReps) {
+                        speak("Set finished");
+                    }
                 }
             }
         });
 
-        poseRef.current = pose;
+        console.log('[MediaPipe] Pose initialized successfully');
+    }, [session, step, preFlightPhase]);
 
-        // Process frames
-        const processFrame = async () => {
-            if (!videoRef.current || videoRef.current.readyState < 2) {
-                animationRef.current = requestAnimationFrame(processFrame);
-                return;
-            }
+    const startCamera = useCallback(async () => {
+        console.log('[Camera] Attempting to start camera...');
 
-            await pose.send({ image: videoRef.current });
-            animationRef.current = requestAnimationFrame(processFrame);
-        };
-
-        animationRef.current = requestAnimationFrame(processFrame);
-
-        return () => {
-            if (animationRef.current) {
-                cancelAnimationFrame(animationRef.current);
-            }
-            pose.close();
-        };
-    }, [poseLoaded, cameraReady, session, step, isResting]);
-
-    // Draw landmarks on canvas
-    useEffect(() => {
-        const canvas = canvasRef.current;
-        if (!canvas || !landmarks || landmarks.length === 0) return;
-
-        // Get actual dimensions
-        const parent = canvas.parentElement;
-        if (!parent) return;
-        const rect = parent.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) return;
-
-        canvas.width = rect.width;
-        canvas.height = rect.height;
-
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        const isCooling = session?.list[step]?.phase === 'COOL';
-        const color = isCooling ? '#00d1ff' : '#00ff41';
-
-        ctx.fillStyle = color;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
-
-        landmarks.forEach((p) => {
-            if ((p.visibility ?? 0) > 0.5) {
-                const x = p.x * canvas.width;
-                const y = p.y * canvas.height;
-
-                ctx.beginPath();
-                ctx.arc(x, y, 8, 0, 2 * Math.PI);
-                ctx.fill();
-            }
-        });
-    }, [landmarks, session, step, isResting]);
-
-    // Rest timer
-    useEffect(() => {
-        if (isResting || (session?.list[step]?.phase === 'COOL')) {
-            setLocalTimer(30);
-            const timer = setInterval(() => {
-                setLocalTimer(prev => {
-                    if (prev <= 1) {
-                        clearInterval(timer);
-                        cycleToNextExercise();
-                        return 0;
-                    }
-                    return prev - 1;
-                });
-            }, 1000);
-            return () => clearInterval(timer);
+        // Check prerequisites
+        if (!window.Pose) {
+            console.error('[Camera] window.Pose not available');
+            setError('MediaPipe not loaded. Please refresh.');
+            return;
         }
-    }, [isResting, step, session, cycleToNextExercise]);
 
+        // Try to get video element - it might not be rendered yet
+        if (!videoRef.current) {
+            console.log('[Camera] videoRef not ready, retrying in 100ms...');
+            setTimeout(() => startCamera(), 100);
+            return;
+        }
+
+        try {
+            console.log('[Camera] Requesting camera access...');
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+                audio: false
+            });
+
+            console.log('[Camera] Stream obtained, attaching to video...');
+            streamRef.current = stream;
+            videoRef.current.srcObject = stream;
+
+            videoRef.current.onloadedmetadata = () => {
+                console.log('[Camera] Metadata loaded, starting video...');
+                videoRef.current?.play().then(() => {
+                    console.log('[Camera] Video playing, initializing pose...');
+                    initPose();
+                    setCameraReady(true);
+                }).catch(err => {
+                    console.error('[Camera] Play error:', err);
+                });
+            };
+
+            // Also handle play errors
+            videoRef.current.onerror = (err) => {
+                console.error('[Camera] Video element error:', err);
+            };
+
+        } catch (err) {
+            console.error('[Camera] Failed to get camera:', err);
+            setError('Camera access denied or not available');
+        }
+    }, [initPose]);
+
+    const startFrameProcessing = useCallback(() => {
+        console.log('[FrameProcessing] Starting frame processing...');
+        const processFrame = async () => {
+            if (videoRef.current && videoRef.current.readyState >= 2 && poseRef.current) {
+                try {
+                    await poseRef.current.send({ image: videoRef.current });
+                } catch (err) {
+                    console.error('[Frame] Error:', err);
+                }
+            }
+            if (videoRef.current && videoRef.current.srcObject) {
+                animationFrameRef.current = requestAnimationFrame(processFrame);
+            }
+        };
+        processFrame();
+    }, []);
+
+    useEffect(() => {
+        console.log('[Effect] preFlightPhase:', preFlightPhase, 'poseLoaded:', poseLoaded, 'cameraReady:', cameraReady);
+
+        if (preFlightPhase === 'ACTION' && poseLoaded && !cameraReady) {
+            console.log('[Effect] Calling startCamera()...');
+            startCamera();
+        }
+        if (preFlightPhase === 'ACTION' && cameraReady) {
+            console.log('[Effect] Camera ready, initializing pose and starting frame processing...');
+            initPose();
+            startFrameProcessing();
+        }
+    }, [preFlightPhase, poseLoaded, cameraReady, startCamera, initPose, startFrameProcessing]);
+
+    useEffect(() => {
+        if (preFlightPhase === 'DEMO') {
+            setLocalReps(0);
+            prevSquatStateRef.current = 'neutral';
+            repCountedRef.current = false;
+            aiState.current = { stage: 'neutral', lastTime: 0, cooldown: false };
+            setFeedback('READY');
+        }
+    }, [step, preFlightPhase]);
+
+    const handleDemoReady = useCallback(() => startActionPhase(), [startActionPhase]);
+    const handleActionComplete = useCallback(() => startRestPhase(), [startRestPhase]);
+    const handleExitAction = useCallback(() => { setLocalReps(0); repCountedRef.current = false; }, []);
+    const handleRestComplete = useCallback(() => cycleToNextExercise(), [cycleToNextExercise]);
+    const handleSkipRest = useCallback(() => cycleToNextExercise(), [cycleToNextExercise]);
+    const handleReadyForNext = useCallback(() => cycleToNextExercise(), [cycleToNextExercise]);
     const handleSkip = useCallback(() => {
-        cycleToNextExercise();
-    }, [cycleToNextExercise]);
+        if (preFlightPhase === 'DEMO') startActionPhase();
+        else if (preFlightPhase === 'ACTION') { handleExitAction(); startRestPhase(); }
+        else cycleToNextExercise();
+    }, [preFlightPhase, startActionPhase, handleExitAction, startRestPhase, cycleToNextExercise]);
 
     const handleExit = useCallback(() => {
-        // Stop animation loop immediately for responsive exit
-        if (animationRef.current) {
-            cancelAnimationFrame(animationRef.current);
-            animationRef.current = null;
-        }
-
-        // Stop camera stream
-        if (streamRef.current) {
-            streamRef.current.getTracks().forEach(track => track.stop());
-            streamRef.current = null;
-        }
-
-        // Navigate immediately - useEffect cleanup will close pose
+        if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+        streamRef.current?.getTracks().forEach(track => track.stop());
+        poseRef.current?.close();
         router.push('/');
     }, [router]);
 
-    if (!session) {
-        return (
-            <div className="app-container bg-black text-white">
-                <p className="text-center mt-20">Loading...</p>
-            </div>
-        );
+    const activeEx = useMemo(() => session?.list[step], [session, step]);
+    const isCooling = activeEx?.phase === 'COOL';
+
+    const renderPhase = useCallback(() => {
+        if (!activeEx) return null;
+
+        // Determine feedback color based on stage and feedback status
+        let feedbackColor = '#00ff41';
+        if (aiState.current.stage === 'peak') {
+            feedbackColor = '#00ff41';
+        } else if (feedback.includes('LOWER') || feedback.includes('CHEST DOWN')) {
+            feedbackColor = '#fbbf24';
+        }
+
+        switch (preFlightPhase) {
+            case 'DEMO': return <PreFlightGuide exercise={activeEx} onReady={handleDemoReady} />;
+            case 'ACTION': return <ActionPhase
+                exercise={activeEx}
+                reps={localReps}
+                currentSet={currentSet}
+                landmarks={landmarks}
+                onCompleteSet={handleActionComplete}
+                onExitAction={handleExitAction}
+                stage={aiState.current.stage}
+                feedbackColor={feedbackColor}
+            />;
+            case 'REST': return <RestPhase exercise={activeEx} currentSet={currentSet} totalSets={activeEx.targetSets} timerSec={15} onTimerComplete={handleRestComplete} onSkipRest={handleSkipRest} onReadyForNext={handleReadyForNext} isCooling={isCooling} />;
+            default: return null;
+        }
+    }, [activeEx, preFlightPhase, localReps, currentSet, landmarks, feedback, handleDemoReady, handleActionComplete, handleExitAction, handleRestComplete, handleSkipRest, handleReadyForNext, isCooling]);
+
+    if (!session || !activeEx) {
+        return <div className="h-screen bg-black text-white flex items-center justify-center"><p>Loading...</p></div>;
     }
 
-    const activeEx = session.list[step];
-    const isCooling = activeEx.phase === 'COOL';
-    const displayTimer = isResting || isCooling ? localTimer : 30;
-
     return (
-        <div className="app-container bg-black font-mono">
-            {/* Error display */}
-            {error && (
-                <div className="absolute top-20 left-0 right-0 z-50 bg-red-500/80 text-white p-4 text-center">
-                    {error}
-                </div>
-            )}
+        <div className="h-screen w-full bg-black font-mono">
+            {error && <div className="absolute top-20 left-0 right-0 bg-red-500/80 text-white p-4 text-center z-50">{error}</div>}
 
-            {/* Top bar */}
             <div className="absolute top-0 inset-x-0 p-6 flex justify-between items-start z-50 bg-gradient-to-b from-black/90 to-transparent">
                 <ExitButton onClick={handleExit} />
                 <div className="text-right">
-                    <p className="text-[#00ff41] text-[10px] font-bold uppercase tracking-widest">
-                        Ex {step + 1} / {session.list.length}
-                    </p>
-                    <h2 className="text-white text-3xl font-black uppercase italic leading-none">
-                        {activeEx.name}
-                    </h2>
+                    <p className="text-[#00ff41] text-[10px] font-bold uppercase tracking-widest">Ex {step + 1}/{session.list.length}</p>
+                    <h2 className="text-white text-3xl font-black uppercase italic leading-none">{activeEx.name}</h2>
                 </div>
             </div>
 
-            {/* Video viewport - z-index 5, canvas z-index 10 */}
-            <div className="viewport-container relative">
-                <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className="absolute top-0 left-0 w-full h-full object-cover transform scale-x-[-1] z-5"
-                />
+            {preFlightPhase !== 'DEMO' && (
+                <div className="viewport-container relative w-full h-screen">
+                    <video ref={videoRef} autoPlay playsInline muted className="absolute top-0 left-0 w-full h-full object-cover transform scale-x-[-1]" />
+                    <div className="absolute top-20 left-4 bg-black/70 text-green-400 text-xs font-mono p-2 z-50">
+                        <div>Camera: {cameraReady ? 'ready' : 'starting'}</div>
+                        <div>Pose: {poseLoaded ? 'loaded' : 'loading'}</div>
+                        <div>Landmarks: {landmarks?.length || 0}</div>
+                    </div>
+                </div>
+            )}
 
-                <canvas
-                    ref={canvasRef}
-                    className="absolute top-0 left-0 w-full h-full z-10 pointer-events-none transform scale-x-[-1]"
-                    style={{ width: '100%', height: '100%' }}
-                />
+            {preFlightPhase === 'DEMO' && <div className="viewport-container relative bg-black" />}
 
-                {(isResting || isCooling) ? (
-                    <RestOverlay timerSec={displayTimer} isCooling={isCooling} />
-                ) : (
-                    <RepCounter reps={localReps} currentSet={currentSet} exercise={activeEx} />
-                )}
+            {renderPhase()}
 
-                <div className="absolute inset-0 pointer-events-none opacity-5 cyber-grid z-1" />
-            </div>
-
-            {/* Bottom controls */}
-            <WorkoutControls
-                session={session}
-                currentStep={step}
-                status={localStatus}
-                onSkip={handleSkip}
-            />
+            {preFlightPhase === 'ACTION' && (
+                <WorkoutControls session={session} currentStep={step} status={preFlightPhase} onSkip={handleSkip} />
+            )}
         </div>
     );
 }

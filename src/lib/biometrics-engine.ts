@@ -22,7 +22,8 @@ export interface AIState {
 
 export class BiometricsEngine {
     private state: AIState;
-    private readonly COOLDOWN_MS = 800;
+    // Architecture v37: Safety Lock - 1.2 second cooldown to prevent ghost counting
+    private readonly COOLDOWN_MS = 1200;
 
     constructor() {
         this.state = { stage: 'neutral', lastTime: 0, cooldown: false };
@@ -51,7 +52,7 @@ export class BiometricsEngine {
         switch (exercise.logic) {
             case 'jack':
                 return this.processJack(landmarks, exercise, now);
-            case 'squat-normal':
+            case 'squat':
                 return this.processSquat(landmarks, exercise, now);
             case 'pushup':
                 return this.processPushup(landmarks, exercise, now);
@@ -170,16 +171,53 @@ export function drawPoseLandmarks(
     landmarks: PoseLandmark[],
     width: number,
     height: number,
-    color: string = '#00ff41'
+    dotColor: string = '#00ffff',
+    lineColor: string = '#ff6600'
 ): void {
     if (!landmarks) return;
 
-    landmarks.forEach(p => {
-        if ((p.visibility ?? 1) > 0.5) {
+    // Body skeleton connections
+    const BODY_CONNECTIONS = [
+        [11, 12], // Shoulders
+        [11, 13], [13, 15], // Left arm
+        [12, 14], [14, 16], // Right arm
+        [11, 23], [12, 24], // Shoulders to hips
+        [23, 24], // Hips
+        [23, 25], [25, 27], // Left leg
+        [24, 26], [26, 28], // Right leg
+    ];
+
+    // Draw skeleton lines first (below dots)
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = 3;
+
+    BODY_CONNECTIONS.forEach(([start, end]) => {
+        const startLandmark = landmarks[start];
+        const endLandmark = landmarks[end];
+
+        if (startLandmark && endLandmark &&
+            (startLandmark.visibility ?? 1) > 0.3 &&
+            (endLandmark.visibility ?? 1) > 0.3) {
             ctx.beginPath();
-            ctx.arc(p.x * width, p.y * height, 5, 0, 2 * Math.PI);
-            ctx.fillStyle = color;
+            ctx.moveTo(startLandmark.x * width, startLandmark.y * height);
+            ctx.lineTo(endLandmark.x * width, endLandmark.y * height);
+            ctx.stroke();
+        }
+    });
+
+    // Draw landmarks as dots
+    landmarks.forEach((p, index) => {
+        if ((p.visibility ?? 1) > 0.5) {
+            const size = index < 11 ? 6 : 8; // Larger dots for key body parts
+            ctx.beginPath();
+            ctx.arc(p.x * width, p.y * height, size, 0, 2 * Math.PI);
+            ctx.fillStyle = dotColor;
             ctx.fill();
+
+            // Add white outline for better visibility
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
         }
     });
 }

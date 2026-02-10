@@ -13,7 +13,7 @@ export default function Home() {
           SPOTTER.AI
         </h1>
         <p className="text-[#00ff41] font-mono text-[10px] uppercase tracking-[0.5em] mt-2 font-black">
-          Relative Biometrics v30
+          Core Engine v43
         </p>
       </header>
       <div className="w-full max-w-xl mx-auto space-y-4 mb-20">

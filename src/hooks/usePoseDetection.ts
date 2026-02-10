@@ -3,6 +3,8 @@
 import { useCallback, useRef, useState, useEffect } from 'react';
 import { Pose, Results } from '@mediapipe/pose';
 
+// Module is already configured in layout.tsx
+
 export function usePoseDetection(onResults: (results: Results) => void) {
     const poseRef = useRef<Pose | null>(null);
     const [isReady, setIsReady] = useState(false);
@@ -13,8 +15,13 @@ export function usePoseDetection(onResults: (results: Results) => void) {
 
         const initPose = async () => {
             try {
+                console.log('[DEBUG-Pose] Initializing Pose...');
+
                 pose = new Pose({
-                    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`,
+                    locateFile: (file) => {
+                        console.log('[DEBUG-Pose-locateFile]', file);
+                        return `/${file}`;
+                    },
                 });
 
                 pose.setOptions({
@@ -27,7 +34,9 @@ export function usePoseDetection(onResults: (results: Results) => void) {
                 pose.onResults(onResults);
                 poseRef.current = pose;
                 setIsReady(true);
+                console.log('[DEBUG-Pose] Pose ready');
             } catch (err) {
+                console.error('[DEBUG-Pose] Init error:', err);
                 setError(err instanceof Error ? err.message : 'Failed to initialize pose detection');
             }
         };
@@ -42,42 +51,4 @@ export function usePoseDetection(onResults: (results: Results) => void) {
     }, [onResults]);
 
     return { poseRef, isReady, error };
-}
-
-export function useCamera(videoRef: React.RefObject<HTMLVideoElement>, onFrame: () => Promise<void>) {
-    const streamRef = useRef<MediaStream | null>(null);
-    const [hasPermission, setHasPermission] = useState<boolean | null>(null);
-    const [error, setError] = useState<string | null>(null);
-
-    const startCamera = useCallback(async () => {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: 1280, height: 720, facingMode: 'user' },
-            });
-            streamRef.current = stream;
-            if (videoRef.current) {
-                videoRef.current.srcObject = stream;
-                await videoRef.current.play();
-            }
-            setHasPermission(true);
-        } catch (err) {
-            if (err instanceof Error) {
-                if (err.name === 'NotAllowedError') {
-                    setHasPermission(false);
-                    setError('Camera permission denied');
-                } else {
-                    setError(err.message);
-                }
-            }
-        }
-    }, [videoRef]);
-
-    const stopCamera = useCallback(() => {
-        if (streamRef.current) {
-            streamRef.current.getTracks().forEach(track => track.stop());
-            streamRef.current = null;
-        }
-    }, []);
-
-    return { startCamera, stopCamera, hasPermission, error };
 }
